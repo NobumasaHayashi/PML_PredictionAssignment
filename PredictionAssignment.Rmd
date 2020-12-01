@@ -1,5 +1,5 @@
 ---
-title: "Prediction_Assignment"
+title: "Practical Machine Leaning Peer Assignment -Weight Lifting Excercise Prediction"
 author: "Nobumasa Hayashi"
 date: "11/30/2020"
 output: html_document
@@ -9,22 +9,116 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Executive summary
+This analysis has been done in order to predict the manner in barbell lifting. The data were collected from 6 participants. They were asked to perform weight lifting in 5 different ways. Then, the outcome variable has five classes and the total number of predictors are 159. The model constructed by the method of random forest shows the overall accuracy of 99.2% and the out-of-sample error of 0.8%. 
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+## Preparation
+```{r preparation, warning = FALSE, cache =TRUE}
+library(caret)
+library(randomForest)
+library(parallel)
+library(doParallel)
 ```
 
-## Including Plots
+## Data loading
+```{r DataLoading, cache =TRUE}
+URL1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+URL2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
 
-You can also embed plots, for example:
+filename1 <- "pml-training.csv"
+filename2 <- "pml-testing.csv"
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+download.file(url=URL1, destfile = filename1, method ="curl")
+download.file(url=URL2, destfile = filename2, method ="curl")
+
+training<-read.csv("pml-training.csv", row.names=1, na.strings="")
+testing<-read.csv("pml-testing.csv", row.names=1, na.strings="NA")
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## Preprocess
+First, we have to remove the variables that have close to zero variance in both training and testing data sets, and then remove the columns with missing values to avoid issues in training models.  
+```{r preprocess1, cache =TRUE}
+#Remove near zero values
+nsv<-nearZeroVar(training,saveMetrics=TRUE)
+training<-training[,!nsv$nzv]
+testing<-testing[,!nsv$nzv]
+dim(training)
+dim(testing)
+
+#Remove variables with missing values
+training_fna <- training[,colSums(is.na(training))==0]
+testing_fna <- testing[,colSums(is.na(testing))==0]
+dim(training_fna)
+dim(testing_fna)
+
+#Remove unnecessary columns 
+colRm_tr<-c("user_name", "raw_timestamp_part_1","raw_timestamp_part_2", "cvtd_timestamp", "num_window")
+colRm_test<-c("user_name", "raw_timestamp_part_1","raw_timestamp_part_2", "cvtd_timestamp","num_window", "problem_id")
+training_rm <- training_fna[,!(names(training_fna) %in% colRm_tr)]
+testing_rm <- testing_fna[,!(names(testing_fna) %in% colRm_test)]
+dim(training_rm)
+dim(testing_rm)
+```
+Now we split the preprocessed training data set into training set and validation set.
+```{r preprocess2, cache =TRUE}
+inTrain <- createDataPartition(y=training_rm$classe,
+                               p=0.7, list=FALSE)
+training_ml <- training_rm[inTrain,]
+validation_ml <- training_rm[-inTrain,]
+training_ml$classe <- factor(training_ml$classe)
+validation_ml$classe <- factor(validation_ml$classe)
+dim(training_ml)
+dim(validation_ml)
+```
+The new training set and validation set contain 52 predictors and 1 response. The correlation between the predictors and the response in the new training set are evaluated. Then, the correlation analysis indicates that there doesn't seem to be significant predictors correlated with the outcome. Therefore, linear regression model may not be a good option. Random forest model may be better for this data. 
+```{r correlation, cache=TRUE}
+cor<-abs(sapply(colnames(training_ml[,-ncol(training)]), function(x) cor(as.numeric(training_ml[,x]), as.numeric(factor(training_ml$classe)), method="spearman")))
+```
+
+## Random Forest Model
+Here, we fit a random forest model. Since this type of model is computationally expensive, parallel processing method in caret is conducted with the "parallel" and "doParallel" packages. In the following code, first, the parallel back-end processors are registered. Then, random forest model is trained with the new training data set. After the heavy calculation, parallel processing cluster is de-registered. 
+
+```{r modelling, cache =TRUE}
+#Register the parallel backend processors
+cluster <- makeCluster(detectCores()-1)
+registerDoParallel(cluster)
+
+#train the model by Random forest method
+set.seed(100)
+fit_rf <- train(classe ~ ., data = training_ml, method ="rf",
+                verbose = TRUE, trControl = trainControl(method = "cv", number = 3))
+#De-register the parallel processing cluster
+stopCluster(cluster)
+registerDoSEQ()
+
+#predict the manner in weight lifting
+pred_rf <- predict(fit_rf, validation_ml)
+confusionM_rf <-confusionMatrix(pred_rf, validation_ml$classe)
+confusionM_rf
+```
+The constructed model is applied to the validation data set. The overall accuracy is 99.2% and the out-of-sample error is 0.8%, which is quite low. 
+```{r ImportanceAnalysis, cache=TRUE}
+imp<- varImp(fit_rf)$importance
+varImpPlot(fit_rf$finalModel,main="Importance of the Predictors")
+```
+
+The variable importance plot shows that the top 4 important variables for this model are 'roll_belt', 'yaw_belt', 'magnet_dumbbell_z', and 'magnet_dumbbell_y'.
+
+## Prediction
+In the last part, the constructed model is applied to the test data set. The predicted results are stored in the format to the Course Project Prediction Quiz.
+
+```{r prediction, cache = TRUE }
+pred_test <- predict(fit_rf, newdata=testing_rm)
+write_files <- function(x){
+  n <- length(x)
+  for (i in 1:n){
+    filename <- paste0("problem_id", i, ".txt")
+    write.table(x[i], file = filename, quote =FALSE, row.names = FALSE, 
+                col.names = FALSE)
+  }
+}
+write_files(pred_test)
+```
+
+## Conclusion
+In this analysis, random forest model is constructed to predict the manner in barbell lifting. The constructed model is applied to the validation data set. The overall accuracy is 99.2% and the out-of-sample error is 0.8%.
